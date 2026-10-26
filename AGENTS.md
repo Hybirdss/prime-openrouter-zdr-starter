@@ -13,8 +13,12 @@ This is a generic public installer profile for official Prime Agent, OpenRouter 
 ## Preserve the profile
 
 - Model: `deepseek/deepseek-v4.1-flash-1017`.
-- Provider: `openrouter-zdr`, base URL `https://openrouter.ai/api/v1`.
+- Provider: `openrouter`, base URL `https://openrouter.ai/api/v1`. The native provider ID is required for OpenRouter reported-cost accounting. Do not replace it with an alias.
 - Required compatibility option: `openRouterRouting.zdr: true`.
+- Profiles: balanced uses default price-weighted routing; economy adds `sort: price`; fast adds `sort: throughput`. Use `./prime --profile economy` or `fast`. Profiles have separate config/session/daemon state.
+- Default reasoning: `low`. Supported wire efforts: `none`, `low`, `high`, `max`. Do not restore the unsupported `medium` default. Keep output/context limits unless a real workload demonstrates a better setting.
+- Preserve the daemon `allowedModels` pin to `openrouter/deepseek/deepseek-v4.1-flash-1017` in every profile.
+- Use reported OpenRouter billing cost when present. Catalog rates are fallback estimates; do not describe them as exact bills or measured savings. `doctor --online` shows current endpoint base prices, excluding time-based overrides.
 - ZDR endpoint availability may change. Never disable ZDR or switch to another model to hide a failure.
 - Changes to `models.json` must use fields supported by the pinned release and pass the real wire check. Generic `requestBody` is not a supported custom-model option.
 - Keep config, Python environment, caches, daemon sockets and sessions under `.runtime/`.
@@ -23,4 +27,4 @@ This is a generic public installer profile for official Prime Agent, OpenRouter 
 
 ## Repository development
 
-Use Python standard library tools for bootstrap and tests. Keep the official release version and all platform SHA-256 values together in `scripts/manage.py`. After changing bootstrap or routing, run unit tests and the installed binary's local wire check. No API secrets belong in CI.
+Use Python standard library tools for bootstrap and tests. Keep the official release version and all platform SHA-256 values together in `scripts/manage.py`. After changing bootstrap or routing, run unit tests and the installed binary's local wire check across all profiles. Keep ZDR, sorting, reasoning, billing-cost, cached-token and model-pin assertions. No API secrets belong in CI. Read docs/research.md before borrowing features from other agents; current pi features need not exist in the pinned Prime release.

@@ -20,7 +20,8 @@ STATE = ROOT / ".runtime"
 BINARY = STATE / "bin" / "prime-agent"
 CONFIG = STATE / "config"
 MODEL = "deepseek/deepseek-v4.1-flash-1017"
-PROVIDER = "openrouter-zdr"
+PROVIDER = "openrouter"
+PROFILES = {"balanced": None, "economy": "price", "fast": "throughput"}
 VERSION = "0.10.1"
 UV_VERSION = "0.9.5"
 BASE = f"https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v{VERSION}"
@@ -39,12 +40,18 @@ def initialize():
         (STATE / name).mkdir(exist_ok=True, mode=0o700)
 
 
-def environment():
+def profile_config(profile="balanced"):
+    if profile not in PROFILES:
+        raise RuntimeError("Choose a profile: balanced, economy, fast.")
+    return CONFIG if profile == "balanced" else STATE / "profiles" / profile
+
+
+def environment(profile="balanced"):
     env = os.environ.copy()
     env.update({
-        "PRIME_AGENT_CODING_AGENT_DIR": str(CONFIG),
+        "PRIME_AGENT_CODING_AGENT_DIR": str(profile_config(profile)),
         "PRIME_AGENT_KERNEL_VENV": str(STATE / "kernel-venv"),
-        "PRIME_AGENT_DAEMON_SOCKET": str(STATE / "tmp" / "daemon.sock"),
+        "PRIME_AGENT_DAEMON_SOCKET": str(STATE / "tmp" / f"{profile}.sock"),
         "UV_CACHE_DIR": str(STATE / "uv-cache"),
         "UV_PYTHON_INSTALL_DIR": str(STATE / "python"),
         "UV_PYTHON_BIN_DIR": str(STATE / "python-bin"),
@@ -60,19 +67,30 @@ def environment():
     return env
 
 
-def models_config():
+def routing(profile="balanced"):
+    profile_config(profile)
+    value = {"zdr": True}
+    if PROFILES[profile]:
+        value["sort"] = PROFILES[profile]
+    return value
+
+
+def models_config(profile="balanced"):
     return {"providers": {PROVIDER: {
         "baseUrl": "https://openrouter.ai/api/v1",
         "api": "openai-completions",
         "apiKey": "OPENROUTER_API_KEY",
-        "compat": {"openRouterRouting": {"zdr": True}},
+        "compat": {"openRouterRouting": routing(profile)},
         "models": [{
             "id": MODEL,
             "name": "DeepSeek V4.1 Flash 1017 (OpenRouter ZDR)",
             "reasoning": True,
+            "thinkingLevelMap": {"off": "none", "minimal": None, "low": "low", "medium": None, "high": "high", "xhigh": None, "max": "max"},
             "input": ["text", "image"],
             "contextWindow": 1048576,
             "maxTokens": 65536,
+            # Catalog reference rates, USD/M tokens; reported usage.cost takes precedence.
+            "cost": {"input": 0.30, "output": 1.20, "cacheRead": 0.006, "cacheWrite": 0.30},
         }],
     }}}
 
@@ -81,7 +99,8 @@ def settings_config():
     return {
         "defaultProvider": PROVIDER,
         "defaultModel": MODEL,
-        "defaultThinkingLevel": "medium",
+        "defaultThinkingLevel": "low",
+        "allowedModels": [f"{PROVIDER}/{MODEL}"],
         "telemetry": {"enabled": False},
     }
 
@@ -95,16 +114,22 @@ def write_private(path, data):
 
 
 def configure():
-    for filename, value in (("models.json", models_config()), ("settings.json", settings_config())):
-        write_private(CONFIG / filename, json.dumps(value, indent=2) + "\n")
-    print("Configured the isolated OpenRouter ZDR profile.")
+    for profile in PROFILES:
+        folder = profile_config(profile)
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for filename, value in (("models.json", models_config(profile)), ("settings.json", settings_config())):
+            write_private(folder / filename, json.dumps(value, indent=2) + "\n")
+    print("Configured balanced, economy and fast ZDR profiles. Default: balanced, low reasoning.")
 
 
-def verify_profile():
-    expected = models_config()
-    path = CONFIG / "models.json"
+def verify_profile(profile="balanced"):
+    expected = models_config(profile)
+    path = profile_config(profile) / "models.json"
     if not path.exists() or json.loads(path.read_text()) != expected:
         raise RuntimeError("Profile differs from the verified ZDR template. Run ./setup.sh --configure-only.")
+    settings = profile_config(profile) / "settings.json"
+    if not settings.exists() or json.loads(settings.read_text()).get("allowedModels") != [f"{PROVIDER}/{MODEL}"]:
+        raise RuntimeError("Pinned-model policy differs. Run ./setup.sh --configure-only.")
 
 
 def target():
@@ -200,12 +225,12 @@ def request_json(url, payload=None, key=None):
         raise RuntimeError("Cannot reach OpenRouter. Check your network and retry.") from None
 
 
-def doctor(online=False):
-    verify_profile()
+def doctor(online=False, profile="balanced"):
+    verify_profile(profile)
     if not BINARY.exists():
         raise RuntimeError("Prime Agent is missing. Run ./setup.sh.")
-    subprocess.run([str(BINARY), "--version"], check=True, env=environment())
-    print("PASS: ZDR profile, pinned model, local config and daemon paths.")
+    subprocess.run([str(BINARY), "--version"], check=True, env=environment(profile))
+    print(f"PASS: {profile} ZDR profile, pinned model, local config and daemon paths.")
     if not (STATE / "kernel-venv" / "bin" / "python").exists():
         raise RuntimeError("Python kernel is missing. Run ./setup.sh to complete runtime bootstrap.")
     print("PASS: Python kernel installed.")
@@ -215,12 +240,20 @@ def doctor(online=False):
         if not endpoints:
             raise RuntimeError("No matching ZDR endpoints were found in OpenRouter's current public list.")
         print(f"PASS: {len(endpoints)} current ZDR endpoints for {MODEL}. No paid inference requested.")
+        print("Advertised base USD/M tokens (time-based overrides may differ; not a billing guarantee):")
+        for endpoint in sorted(endpoints, key=lambda item: item["tag"]):
+            prices = endpoint["pricing"]
+            prompt = float(prices["prompt"]) * 1_000_000
+            output = float(prices["completion"]) * 1_000_000
+            cached = prices.get("input_cache_read")
+            cache_label = "unknown" if cached is None else f"{float(cached) * 1_000_000:.4g}"
+            print(f"  {endpoint['tag']}: input={prompt:.4g} output={output:.4g} cached-input={cache_label}")
 
 
-def smoke():
-    verify_profile()
+def smoke(profile="balanced"):
+    verify_profile(profile)
     result = request_json("https://openrouter.ai/api/v1/chat/completions", {
-        "model": MODEL, "provider": {"zdr": True},
+        "model": MODEL, "provider": routing(profile),
         "messages": [{"role": "user", "content": "Reply with OK."}],
         "reasoning": {"enabled": False}, "max_tokens": 16,
     }, api_key())
@@ -229,11 +262,32 @@ def smoke():
     print("PASS: paid ZDR inference returned a completion. No prompt or API key logged.")
 
 
+def validate_selection(arguments):
+    pinned = {"--provider": PROVIDER, "--model": MODEL}
+    for index, argument in enumerate(arguments):
+        if argument == "--":
+            break
+        for flag, expected in pinned.items():
+            value = None
+            if argument == flag:
+                value = arguments[index + 1] if index + 1 < len(arguments) else ""
+            elif argument.startswith(flag + "="):
+                value = argument.split("=", 1)[1]
+            if value is not None and value != expected:
+                raise RuntimeError(f"This profile pins {flag} to {expected}; use --profile to change routing.")
+
+
 def run(arguments):
-    verify_profile()
+    profile = "balanced"
+    if arguments[:1] == ["--profile"]:
+        if len(arguments) < 2:
+            raise RuntimeError("--profile requires balanced, economy or fast.")
+        profile, arguments = arguments[1], arguments[2:]
+    verify_profile(profile)
+    validate_selection(arguments)
     if not BINARY.exists():
         raise RuntimeError("Run ./setup.sh first.")
-    env = environment()
+    env = environment(profile)
     if arguments and arguments[0] in ("help", "status", "doctor", "shutdown", "model"):
         os.execve(str(BINARY), [str(BINARY), *arguments], env)
     if not arguments or arguments[0] not in ("--help", "-h", "--version", "-v"):
@@ -256,7 +310,9 @@ def main():
     setup.add_argument("--skip-bootstrap", action="store_true")
     check = commands.add_parser("doctor")
     check.add_argument("--online", action="store_true")
-    commands.add_parser("smoke", help="Send one small paid ZDR request using your local key")
+    check.add_argument("--profile", choices=PROFILES, default="balanced")
+    probe = commands.add_parser("smoke", help="Send one small paid ZDR request using your local key")
+    probe.add_argument("--profile", choices=PROFILES, default="balanced")
     args = parser.parse_args()
     if args.command == "setup":
         configure()
@@ -266,9 +322,9 @@ def main():
                 bootstrap()
         print("Ready. Run ./prime, or python3 -I scripts/manage.py doctor --online.")
     elif args.command == "doctor":
-        doctor(args.online)
+        doctor(args.online, args.profile)
     elif args.command == "smoke":
-        smoke()
+        smoke(args.profile)
 
 
 if __name__ == "__main__":

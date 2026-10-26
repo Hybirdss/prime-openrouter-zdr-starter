@@ -48,6 +48,34 @@ class SetupTests(unittest.TestCase):
         for key in ("PRIME_AGENT_CODING_AGENT_DIR", "PRIME_AGENT_KERNEL_VENV", "PRIME_AGENT_DAEMON_SOCKET", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_PYTHON_BIN_DIR", "TMPDIR"):
             self.assertTrue(Path(env[key]).is_relative_to(self.root), key)
 
+    def test_profiles_have_separate_configs_and_daemons(self):
+        manage.configure()
+        environments = [manage.environment(profile) for profile in manage.PROFILES]
+        self.assertEqual(len({env["PRIME_AGENT_CODING_AGENT_DIR"] for env in environments}), 3)
+        self.assertEqual(len({env["PRIME_AGENT_DAEMON_SOCKET"] for env in environments}), 3)
+        for profile in manage.PROFILES:
+            manage.verify_profile(profile)
+        with self.assertRaisesRegex(RuntimeError, "Choose a profile"):
+            manage.environment("invalid")
+
+    def test_removing_model_pin_is_detected(self):
+        manage.configure()
+        path = manage.CONFIG / "settings.json"
+        settings = json.loads(path.read_text())
+        settings.pop("allowedModels")
+        path.write_text(json.dumps(settings))
+        with self.assertRaisesRegex(RuntimeError, "Pinned-model"):
+            manage.verify_profile()
+
+    def test_other_model_is_refused_before_credentials_or_execution(self):
+        manage.configure()
+        for arguments in (["--model", "openai/gpt-4o", "-p", "hello"], ["--provider=another-provider"]):
+            with patch.object(manage, "api_key") as key, patch.object(manage.os, "execve") as execute:
+                with self.assertRaisesRegex(RuntimeError, "profile pins"):
+                    manage.run(arguments)
+                key.assert_not_called()
+                execute.assert_not_called()
+
     def test_key_is_private_and_environment_takes_priority(self):
         path = self.root / "openrouter.key"
         manage.write_private(path, "dummy-stored-key\n")
