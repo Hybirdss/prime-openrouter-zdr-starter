@@ -1,0 +1,33 @@
+name: Verify setup
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: p
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: p
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Unit checks
+        run: python3 -I -m unittest discover -s tests -v
+      - name: Install official pinned agent and kernel
+        run: ./setup.sh
+      - name: Verify config and current ZDR availability
+        run: python3 -I scripts/manage.py doctor --online
+      - name: Verify real request against local server
+        run: python3 -I tests/verify_wire.py
